@@ -1,0 +1,35 @@
+name: Fetch delay data
+
+on:
+  schedule:
+    - cron: "15 3 * * *"   # 03:15 UTC every night
+  workflow_dispatch: {}     # lets you run it manually from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Fetch HSP data
+        env:
+          HSP_USER: ${{ secrets.HSP_USER }}
+          HSP_PASS: ${{ secrets.HSP_PASS }}
+        run: python fetch_delays.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name "delay-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add delays.json
+          git diff --cached --quiet || git commit -m "Update delay data"
+          git push

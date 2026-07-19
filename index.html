@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Preston Park delay tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=VT323&family=Public+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --board-bg: #14140f;
+    --board-amber: #ffb400;
+    --board-dim: #6e5a1e;
+    --page-bg: #f5f4ef;
+    --ink: #22271f;
+    --rail-green: #1d5c38;
+    --claim-red: #b3261e;
+    --claim-bg: #fbe9e7;
+    --warn-bg: #fff4d6;
+    --line: #d8d6cc;
+    --card: #ffffff;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page-bg);
+    color: var(--ink);
+    font-family: "Public Sans", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 16px 64px; }
+
+  /* Departure-board summary strip */
+  header {
+    background: var(--board-bg);
+    padding: 22px 16px 26px;
+    margin-bottom: 24px;
+  }
+  .board {
+    max-width: 880px;
+    margin: 0 auto;
+    font-family: "VT323", monospace;
+    color: var(--board-amber);
+  }
+  .board h1 {
+    font-size: 30px;
+    font-weight: 400;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .board .sub {
+    color: var(--board-dim);
+    font-size: 20px;
+    letter-spacing: 1px;
+    margin-bottom: 14px;
+  }
+  .stats { display: flex; flex-wrap: wrap; gap: 10px 34px; }
+  .stat .num { font-size: 44px; line-height: 1; }
+  .stat .lbl { color: var(--board-dim); font-size: 18px; letter-spacing: 1px; text-transform: uppercase; }
+  .stat.alert .num { color: #ff5c40; }
+
+  /* Filters */
+  .filters {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    margin-bottom: 18px; align-items: center;
+  }
+  .filters select, .filters label {
+    font-family: inherit; font-size: 14px;
+  }
+  .filters select {
+    padding: 7px 10px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--card); color: var(--ink);
+  }
+  .toggle {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 12px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--card); cursor: pointer;
+    user-select: none;
+  }
+  .toggle input { accent-color: var(--claim-red); }
+
+  /* Day groups and table */
+  .day {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; margin-bottom: 14px; overflow: hidden;
+  }
+  .day summary {
+    cursor: pointer; padding: 12px 14px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-weight: 600; list-style: none;
+  }
+  .day summary::-webkit-details-marker { display: none; }
+  .day .meta { font-weight: 400; color: #6b6f63; font-size: 13px; }
+  .day .meta .claim { color: var(--claim-red); font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 8px 14px; text-align: left; font-size: 14px; }
+  th {
+    background: var(--rail-green); color: #fff;
+    font-weight: 600; font-size: 12px; letter-spacing: .4px; text-transform: uppercase;
+  }
+  tr + tr td { border-top: 1px solid var(--line); }
+  td.delay { font-weight: 700; }
+  tr.ok td.delay { color: var(--rail-green); }
+  tr.warn { background: var(--warn-bg); }
+  tr.claim { background: var(--claim-bg); }
+  tr.claim td.delay { color: var(--claim-red); }
+  .pill {
+    display: inline-block; font-size: 11px; font-weight: 700;
+    padding: 2px 7px; border-radius: 999px;
+    background: var(--claim-red); color: #fff; letter-spacing: .4px;
+  }
+  .empty { padding: 40px; text-align: center; color: #6b6f63; }
+  footer { margin-top: 28px; font-size: 12.5px; color: #6b6f63; }
+  @media (max-width: 560px) {
+    th:nth-child(3), td:nth-child(3) { display: none; }
+    .stat .num { font-size: 34px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="board">
+    <h1>Preston Park &harr; London Bridge</h1>
+    <div class="sub" id="updated">Loading&hellip;</div>
+    <div class="stats" id="stats"></div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="filters">
+    <select id="dir">
+      <option value="all">Both directions</option>
+      <option value="PRP-LBG">PRP &rarr; LBG</option>
+      <option value="LBG-PRP">LBG &rarr; PRP</option>
+    </select>
+    <label class="toggle"><input type="checkbox" id="claimOnly"> Claimable only (15+ min or cancelled)</label>
+  </div>
+  <div id="days"></div>
+  <footer>
+    Data: National Rail Historical Service Performance API. Updated nightly; the most recent 2&ndash;3 days
+    are not yet available from HSP. Delay measured at destination. Claimable = 15+ minutes late or cancelled
+    (GTR Delay Repay threshold).
+  </footer>
+</div>
+
+<script>
+let DATA = null;
+
+function fmt(t) { return t ? t.slice(0,2) + ":" + t.slice(2) : "\u2013"; }
+
+function niceDate(iso) {
+  const d = new Date(iso + "T12:00:00");
+  return d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+}
+
+function render() {
+  const dir = document.getElementById("dir").value;
+  const claimOnly = document.getElementById("claimOnly").checked;
+
+  let list = DATA.services;
+  if (dir !== "all") {
+    const [f, t] = dir.split("-");
+    list = list.filter(s => s.from === f && s.to === t);
+  }
+
+  // headline stats from the direction-filtered list (before claimable filter)
+  const total = list.length;
+  const claimable = list.filter(s => s.claimable).length;
+  const cancelled = list.filter(s => s.cancelled).length;
+  const delays = list.filter(s => s.delay_min !== null).map(s => s.delay_min);
+  const avg = delays.length ? (delays.reduce((a,b)=>a+b,0) / delays.length) : 0;
+  const onTime = delays.length ? Math.round(100 * delays.filter(d => d < 5).length / delays.length) : 0;
+
+  document.getElementById("stats").innerHTML = `
+    <div class="stat"><div class="num">${total}</div><div class="lbl">services</div></div>
+    <div class="stat"><div class="num">${onTime}%</div><div class="lbl">within 5 min</div></div>
+    <div class="stat"><div class="num">${avg.toFixed(1)}</div><div class="lbl">avg delay min</div></div>
+    <div class="stat alert"><div class="num">${claimable}</div><div class="lbl">claimable</div></div>
+    <div class="stat alert"><div class="num">${cancelled}</div><div class="lbl">cancelled</div></div>`;
+
+  if (claimOnly) list = list.filter(s => s.claimable);
+
+  // group by date, newest first
+  const byDate = {};
+  for (const s of list) (byDate[s.date] ||= []).push(s);
+  const dates = Object.keys(byDate).sort().reverse();
+
+  const container = document.getElementById("days");
+  if (!dates.length) {
+    container.innerHTML = `<div class="empty">No services match these filters yet. Data appears after the first nightly fetch.</div>`;
+    return;
+  }
+
+  container.innerHTML = dates.map((date, i) => {
+    const rows = byDate[date];
+    const dayClaims = rows.filter(s => s.claimable).length;
+    const body = rows.map(s => {
+      const cls = s.claimable ? "claim" : (s.delay_min !== null && s.delay_min >= 5 ? "warn" : "ok");
+      const delayText = s.cancelled ? `<span class="pill">CANCELLED</span>`
+        : s.delay_min === null ? "\u2013"
+        : (s.delay_min > 0 ? "+" + s.delay_min : s.delay_min);
+      return `<tr class="${cls}">
+        <td>${fmt(s.sched_dep)}</td>
+        <td>${s.from} \u2192 ${s.to}</td>
+        <td>${fmt(s.sched_arr)}</td>
+        <td>${fmt(s.actual_arr)}</td>
+        <td class="delay">${delayText}</td>
+      </tr>`;
+    }).join("");
+    return `<details class="day" ${i === 0 ? "open" : ""}>
+      <summary>${niceDate(date)}
+        <span class="meta">${rows.length} services${dayClaims ? ` &middot; <span class="claim">${dayClaims} claimable</span>` : ""}</span>
+      </summary>
+      <table>
+        <thead><tr><th>Dep</th><th>Route</th><th>Sched arr</th><th>Actual arr</th><th>Delay</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </details>`;
+  }).join("");
+}
+
+fetch("delays.json?" + Date.now())
+  .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+  .then(d => {
+    DATA = d;
+    document.getElementById("updated").textContent =
+      "Last 28 days \u00b7 updated " + niceDate(d.updated);
+    render();
+    document.getElementById("dir").addEventListener("change", render);
+    document.getElementById("claimOnly").addEventListener("change", render);
+  })
+  .catch(() => {
+    document.getElementById("updated").textContent = "No data yet";
+    document.getElementById("days").innerHTML =
+      `<div class="empty">delays.json not found. Run the fetch workflow once from the Actions tab, then refresh.</div>`;
+  });
+</script>
+</body>
+</html>
