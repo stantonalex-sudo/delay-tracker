@@ -98,6 +98,8 @@
     background: var(--rail-green); color: #fff;
     font-weight: 600; font-size: 12px; letter-spacing: .4px; text-transform: uppercase;
   }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { text-decoration: underline; }
   tr + tr td { border-top: 1px solid var(--line); }
   td.delay { font-weight: 700; }
   tr.ok td.delay { color: var(--rail-green); }
@@ -151,6 +153,7 @@
 
 <script>
 let DATA = null;
+let sortAsc = true;
 
 function fmt(t) { return t ? t.slice(0,2) + ":" + t.slice(2) : "\u2013"; }
 
@@ -198,7 +201,8 @@ function render() {
   }
 
   container.innerHTML = dates.map((date, i) => {
-    const rows = byDate[date];
+    const rows = byDate[date].slice().sort((a, b) =>
+      (a.sched_dep < b.sched_dep ? -1 : a.sched_dep > b.sched_dep ? 1 : 0) * (sortAsc ? 1 : -1));
     const dayClaims = rows.filter(s => s.claimable).length;
     const body = rows.map(s => {
       const eff = s.effective_delay_min === undefined ? null : s.effective_delay_min;
@@ -225,7 +229,7 @@ function render() {
         <span class="meta">${rows.length} services${dayClaims ? ` &middot; <span class="claim">${dayClaims} claimable</span>` : ""}</span>
       </summary>
       <table>
-        <thead><tr><th>Dep</th><th>Route</th><th>Sched arr</th><th>Actual arr</th><th>Delay</th><th>Eff delay</th></tr></thead>
+        <thead><tr><th class="sortable" title="Sort by departure time">Dep ${sortAsc ? "▴" : "▾"}</th><th>Route</th><th>Sched arr</th><th>Actual arr</th><th>Delay</th><th>Eff delay</th></tr></thead>
         <tbody>${body}</tbody>
       </table>
     </details>`;
@@ -241,6 +245,9 @@ fetch("delays.json?" + Date.now())
     render();
     document.getElementById("dir").addEventListener("change", render);
     document.getElementById("claimOnly").addEventListener("change", render);
+    document.getElementById("days").addEventListener("click", e => {
+      if (e.target.closest("th.sortable")) { sortAsc = !sortAsc; render(); }
+    });
   })
   .catch(() => {
     document.getElementById("updated").textContent = "No data yet";
