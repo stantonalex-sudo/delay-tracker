@@ -6,6 +6,9 @@ Route: Preston Park (PRP) <-> London Bridge (LBG), all services, all day.
 Credentials come from environment variables HSP_USER and HSP_PASS.
 Output: delays.json in the repo root. The script is incremental - it only
 fetches dates it doesn't already have, then prunes anything older than 28 days.
+After every run it recomputes each service's effective delay: the delay
+against the best train the passenger could still have caught, which is how
+GTR actually vets Delay Repay claims. Claimable keys off effective delay.
 """
 
 import json
@@ -103,6 +106,7 @@ def fetch_day(d: date, from_loc: str, to_loc: str) -> list[dict]:
             continue
 
         sched_dep = dep.get("gbtt_ptd") or ""
+        actual_dep = dep.get("actual_td") or ""
         sched_arr = arr.get("gbtt_pta") or ""
         actual_arr = arr.get("actual_ta") or ""
         cancel_reason = arr.get("late_canc_reason") or ""
@@ -116,15 +120,57 @@ def fetch_day(d: date, from_loc: str, to_loc: str) -> list[dict]:
             "from": from_loc,
             "to": to_loc,
             "sched_dep": sched_dep,
+            "actual_dep": actual_dep,
             "sched_arr": sched_arr,
             "actual_arr": actual_arr,
             "delay_min": delay,
+            "effective_delay_min": None,
             "cancelled": cancelled,
             "reason_code": cancel_reason,
-            "claimable": cancelled or (delay is not None and delay >= DELAY_THRESHOLD),
+            "claimable": False,
         })
 
     return services
+
+
+def compute_effective_delays(services: list[dict]) -> None:
+    """GTR assesses a Delay Repay claim against the best journey still
+    available, not just the booked train. For each service, the candidates
+    are all services on the same date and direction whose actual departure
+    from the origin was at or after this service's scheduled departure
+    (the service itself is always a candidate if it arrived). The effective
+    delay is the earliest candidate arrival measured against this service's
+    scheduled arrival. Claimable keys off that figure.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for s in services:
+        groups.setdefault((s["date"], s["from"], s["to"]), []).append(s)
+
+    for group in groups.values():
+        for s in group:
+            if not s["sched_dep"] or not s["sched_arr"]:
+                s["effective_delay_min"] = None
+                s["claimable"] = s["cancelled"]
+                continue
+            best = None
+            for c in group:
+                if not c["actual_arr"]:
+                    continue
+                if c is not s:
+                    if not c.get("actual_dep"):
+                        continue
+                    if delay_minutes(s["sched_dep"], c["actual_dep"]) < 0:
+                        continue  # departed before this service was due out
+                eff = delay_minutes(s["sched_arr"], c["actual_arr"])
+                if best is None or eff < best:
+                    best = eff
+            s["effective_delay_min"] = best
+            if best is not None:
+                s["claimable"] = best >= DELAY_THRESHOLD
+            else:
+                # no usable train arrived at all; a cancellation with no
+                # alternative is the worst case and clearly claimable
+                s["claimable"] = s["cancelled"]
 
 
 def main():
@@ -161,6 +207,9 @@ def main():
             print(f"  failed for {d} {from_loc}->{to_loc}: {e}", file=sys.stderr)
 
     existing.sort(key=lambda s: (s["date"], s["sched_dep"]))
+
+    # recompute on the whole window so late HSP corrections are picked up
+    compute_effective_delays(existing)
 
     OUT_FILE.write_text(json.dumps({
         "updated": today.isoformat(),
