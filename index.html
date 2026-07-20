@@ -98,12 +98,18 @@
     background: var(--rail-green); color: #fff;
     font-weight: 600; font-size: 12px; letter-spacing: .4px; text-transform: uppercase;
   }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { text-decoration: underline; }
   tr + tr td { border-top: 1px solid var(--line); }
   td.delay { font-weight: 700; }
   tr.ok td.delay { color: var(--rail-green); }
   tr.warn { background: var(--warn-bg); }
   tr.claim { background: var(--claim-bg); }
   tr.claim td.delay { color: var(--claim-red); }
+  td.delay.own.struck {
+    text-decoration: line-through;
+    color: #6b6f63; font-weight: 400;
+  }
   .pill {
     display: inline-block; font-size: 11px; font-weight: 700;
     padding: 2px 7px; border-radius: 999px;
@@ -134,18 +140,20 @@
       <option value="PRP-LBG">PRP &rarr; LBG</option>
       <option value="LBG-PRP">LBG &rarr; PRP</option>
     </select>
-    <label class="toggle"><input type="checkbox" id="claimOnly"> Claimable only (15+ min or cancelled)</label>
+    <label class="toggle"><input type="checkbox" id="claimOnly"> Claimable only (15+ min effective delay)</label>
   </div>
   <div id="days"></div>
   <footer>
     Data: National Rail Historical Service Performance API. Updated nightly; the most recent 2&ndash;3 days
-    are not yet available from HSP. Delay measured at destination. Claimable = 15+ minutes late or cancelled
-    (GTR Delay Repay threshold).
+    are not yet available from HSP. Delay measured at destination. Eff delay = delay against the best train
+    you could still have caught, which is how GTR vets claims. Claimable = 15+ minutes effective delay
+    (a struck-through delay means a later train overtook it, so the claim would fail).
   </footer>
 </div>
 
 <script>
 let DATA = null;
+let sortAsc = true;
 
 function fmt(t) { return t ? t.slice(0,2) + ":" + t.slice(2) : "\u2013"; }
 
@@ -193,19 +201,27 @@ function render() {
   }
 
   container.innerHTML = dates.map((date, i) => {
-    const rows = byDate[date];
+    const rows = byDate[date].slice().sort((a, b) =>
+      (a.sched_dep < b.sched_dep ? -1 : a.sched_dep > b.sched_dep ? 1 : 0) * (sortAsc ? 1 : -1));
     const dayClaims = rows.filter(s => s.claimable).length;
     const body = rows.map(s => {
-      const cls = s.claimable ? "claim" : (s.delay_min !== null && s.delay_min >= 5 ? "warn" : "ok");
-      const delayText = s.cancelled ? `<span class="pill">CANCELLED</span>`
+      const eff = s.effective_delay_min === undefined ? null : s.effective_delay_min;
+      const cls = s.claimable ? "claim" : (eff !== null && eff >= 5 ? "warn" : "ok");
+      const ownText = s.cancelled ? `<span class="pill">CANCELLED</span>`
         : s.delay_min === null ? "\u2013"
         : (s.delay_min > 0 ? "+" + s.delay_min : s.delay_min);
+      const effText = eff === null ? "\u2013" : (eff > 0 ? "+" + eff : eff);
+      // own delay hits the threshold but a later train got there sooner:
+      // GTR would reject this claim, so mute the own figure
+      const overtaken = !s.cancelled && s.delay_min !== null && s.delay_min >= 15
+        && eff !== null && eff < 15;
       return `<tr class="${cls}">
         <td>${fmt(s.sched_dep)}</td>
         <td>${s.from} \u2192 ${s.to}</td>
         <td>${fmt(s.sched_arr)}</td>
         <td>${fmt(s.actual_arr)}</td>
-        <td class="delay">${delayText}</td>
+        <td class="delay own${overtaken ? " struck" : ""}"${overtaken ? ' title="Overtaken: a later train arrived sooner, claim would fail"' : ""}>${ownText}</td>
+        <td class="delay">${effText}</td>
       </tr>`;
     }).join("");
     return `<details class="day" ${i === 0 ? "open" : ""}>
@@ -213,7 +229,7 @@ function render() {
         <span class="meta">${rows.length} services${dayClaims ? ` &middot; <span class="claim">${dayClaims} claimable</span>` : ""}</span>
       </summary>
       <table>
-        <thead><tr><th>Dep</th><th>Route</th><th>Sched arr</th><th>Actual arr</th><th>Delay</th></tr></thead>
+        <thead><tr><th class="sortable" title="Sort by departure time">Dep ${sortAsc ? "▴" : "▾"}</th><th>Route</th><th>Sched arr</th><th>Actual arr</th><th>Delay</th><th>Eff delay</th></tr></thead>
         <tbody>${body}</tbody>
       </table>
     </details>`;
@@ -229,6 +245,9 @@ fetch("delays.json?" + Date.now())
     render();
     document.getElementById("dir").addEventListener("change", render);
     document.getElementById("claimOnly").addEventListener("change", render);
+    document.getElementById("days").addEventListener("click", e => {
+      if (e.target.closest("th.sortable")) { sortAsc = !sortAsc; render(); }
+    });
   })
   .catch(() => {
     document.getElementById("updated").textContent = "No data yet";
