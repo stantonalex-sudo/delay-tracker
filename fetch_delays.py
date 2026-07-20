@@ -141,23 +141,24 @@ def main():
 
     # keep only records inside the window
     existing = [s for s in existing if s["date"] >= oldest.strftime("%Y-%m-%d")]
-    have_dates = {s["date"] for s in existing}
+    # track per (date, route) so a partially fetched date still backfills
+    have = {(s["date"], s["from"], s["to"]) for s in existing}
 
     wanted = []
     d = oldest
     while d <= newest:
-        if d.strftime("%Y-%m-%d") not in have_dates:
-            wanted.append(d)
+        for from_loc, to_loc in ROUTES:
+            if (d.strftime("%Y-%m-%d"), from_loc, to_loc) not in have:
+                wanted.append((d, from_loc, to_loc))
         d += timedelta(days=1)
 
-    print(f"Fetching {len(wanted)} missing date(s)...")
-    for d in wanted:
-        for from_loc, to_loc in ROUTES:
-            print(f"  {d} {from_loc}->{to_loc}")
-            try:
-                existing.extend(fetch_day(d, from_loc, to_loc))
-            except Exception as e:
-                print(f"  failed for {d} {from_loc}->{to_loc}: {e}", file=sys.stderr)
+    print(f"Fetching {len(wanted)} missing date/route combination(s)...")
+    for d, from_loc, to_loc in wanted:
+        print(f"  {d} {from_loc}->{to_loc}")
+        try:
+            existing.extend(fetch_day(d, from_loc, to_loc))
+        except Exception as e:
+            print(f"  failed for {d} {from_loc}->{to_loc}: {e}", file=sys.stderr)
 
     existing.sort(key=lambda s: (s["date"], s["sched_dep"]))
 
