@@ -39,6 +39,12 @@ DELAY_THRESHOLD = 15  # minutes late at destination that qualifies for Delay Rep
 
 OUT_FILE = Path(__file__).parent / "delays.json"
 
+RETRIES = 4        # attempts per HSP request before giving up on it
+BACKOFF_S = 5      # first retry wait, doubles each time (5, 10, 20)
+DETAIL_SLEEP_S = 0.5   # pause between detail calls, HSP throttles bursts
+PAIR_SLEEP_S = 2       # pause between date/route fetches
+MAX_PAIR_FAILURES = 3  # consecutive failed date/route fetches before stopping
+
 
 def days_value(d: date) -> str:
     if d.weekday() <= 4:
@@ -47,15 +53,30 @@ def days_value(d: date) -> str:
 
 
 def hsp_post(url: str, body: dict) -> dict:
-    r = requests.post(
-        url,
-        json=body,
-        auth=(HSP_USER, HSP_PASS),
-        headers={"Content-Type": "application/json"},
-        timeout=60,
-    )
-    r.raise_for_status()
-    return r.json()
+    """POST to HSP with retries. HSP throttles by letting requests hang
+    until they time out, so timeouts and 5xx/429 responses are retried
+    with a growing pause. Other HTTP errors fail immediately."""
+    wait = BACKOFF_S
+    for attempt in range(RETRIES):
+        try:
+            r = requests.post(
+                url,
+                json=body,
+                auth=(HSP_USER, HSP_PASS),
+                headers={"Content-Type": "application/json"},
+                timeout=60,
+            )
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            retryable = status is None or status == 429 or status >= 500
+            if not retryable or attempt == RETRIES - 1:
+                raise
+            print(f"  HSP not responding ({e}); retrying in {wait}s",
+                  file=sys.stderr)
+            time.sleep(wait)
+            wait *= 2
 
 
 def to_minutes(hhmm: str) -> int:
@@ -90,13 +111,20 @@ def fetch_day(d: date, from_loc: str, to_loc: str) -> list[dict]:
         attrs = svc.get("serviceAttributesMetrics", {})
         rids.extend(attrs.get("rids", []))
 
+    consecutive_failures = 0
     for rid in rids:
         try:
             detail = hsp_post(DETAILS_URL, {"rid": rid})
-        except requests.HTTPError as e:
+            consecutive_failures = 0
+        except requests.RequestException as e:
             print(f"  detail fetch failed for {rid}: {e}", file=sys.stderr)
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                # HSP is refusing everything; give up on this date/route
+                # so the next run refetches it in full
+                raise RuntimeError(f"HSP repeatedly failing on {ds}") from e
             continue
-        time.sleep(0.25)  # be polite to the API
+        time.sleep(DETAIL_SLEEP_S)  # be polite to the API
 
         attrs = detail.get("serviceAttributesDetails", {})
         locations = attrs.get("locations", [])
@@ -198,26 +226,36 @@ def main():
                 wanted.append((d, from_loc, to_loc))
         d += timedelta(days=1)
 
-    print(f"Fetching {len(wanted)} missing date/route combination(s)...")
+    def save():
+        existing.sort(key=lambda s: (s["date"], s["sched_dep"]))
+        # recompute on the whole window so late HSP corrections are picked up
+        compute_effective_delays(existing)
+        OUT_FILE.write_text(json.dumps({
+            "updated": today.isoformat(),
+            "window_days": WINDOW_DAYS,
+            "threshold_min": DELAY_THRESHOLD,
+            "services": existing,
+        }, indent=1))
+
+    print(f"Fetching {len(wanted)} missing date/route combination(s)...", flush=True)
+    consecutive_pair_failures = 0
     for d, from_loc, to_loc in wanted:
-        print(f"  {d} {from_loc}->{to_loc}")
+        print(f"  {d} {from_loc}->{to_loc}", flush=True)
         try:
             existing.extend(fetch_day(d, from_loc, to_loc))
+            consecutive_pair_failures = 0
+            save()  # keep progress even if a later fetch dies
         except Exception as e:
             print(f"  failed for {d} {from_loc}->{to_loc}: {e}", file=sys.stderr)
+            consecutive_pair_failures += 1
+            if consecutive_pair_failures >= MAX_PAIR_FAILURES:
+                print("HSP seems to be down or throttling hard; stopping "
+                      "this run. The next run picks up where this left off.",
+                      file=sys.stderr)
+                break
+        time.sleep(PAIR_SLEEP_S)
 
-    existing.sort(key=lambda s: (s["date"], s["sched_dep"]))
-
-    # recompute on the whole window so late HSP corrections are picked up
-    compute_effective_delays(existing)
-
-    OUT_FILE.write_text(json.dumps({
-        "updated": today.isoformat(),
-        "window_days": WINDOW_DAYS,
-        "threshold_min": DELAY_THRESHOLD,
-        "services": existing,
-    }, indent=1))
-
+    save()
     claimable = sum(1 for s in existing if s["claimable"])
     print(f"Done. {len(existing)} services stored, {claimable} claimable.")
 
