@@ -1,0 +1,24 @@
+name: Test return direction
+
+# One-shot, manual only. Two HSP calls to check LBG->PRP data exists and
+# parses for one day. Writes nothing, needs no write permissions.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Test LBG to PRP
+        env:
+          HSP_USER: ${{ secrets.HSP_USER }}
+          HSP_PASS: ${{ secrets.HSP_PASS }}
+        run: python hsp_test_return.py
