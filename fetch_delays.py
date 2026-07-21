@@ -39,11 +39,16 @@ DELAY_THRESHOLD = 15  # minutes late at destination that qualifies for Delay Rep
 
 OUT_FILE = Path(__file__).parent / "delays.json"
 
-RETRIES = 4        # attempts per HSP request before giving up on it
-BACKOFF_S = 5      # first retry wait, doubles each time (5, 10, 20)
-DETAIL_SLEEP_S = 0.5   # pause between detail calls, HSP throttles bursts
-PAIR_SLEEP_S = 2       # pause between date/route fetches
-MAX_PAIR_FAILURES = 3  # consecutive failed date/route fetches before stopping
+# HSP rate-limits by request volume: single calls return in a few seconds,
+# but a burst (a full re-backfill is ~1800 calls) makes it stall connections
+# until they time out. So we fetch gently and let the nightly run fill the
+# window over several days rather than in one sweep.
+CONNECT_TIMEOUT_S = 10   # a healthy connect is well under a second
+READ_TIMEOUT_S = 20      # a healthy response comes back in ~4s; longer means throttled
+DETAIL_SLEEP_S = 1.0     # pause between detail calls
+PAIR_SLEEP_S = 3         # pause between date/route fetches
+MAX_PAIRS_PER_RUN = 6    # only fetch this many date/routes per run, then stop
+MAX_PAIR_FAILURES = 2    # consecutive failed date/route fetches before stopping
 
 
 def days_value(d: date) -> str:
@@ -53,30 +58,19 @@ def days_value(d: date) -> str:
 
 
 def hsp_post(url: str, body: dict) -> dict:
-    """POST to HSP with retries. HSP throttles by letting requests hang
-    until they time out, so timeouts and 5xx/429 responses are retried
-    with a growing pause. Other HTTP errors fail immediately."""
-    wait = BACKOFF_S
-    for attempt in range(RETRIES):
-        try:
-            r = requests.post(
-                url,
-                json=body,
-                auth=(HSP_USER, HSP_PASS),
-                headers={"Content-Type": "application/json"},
-                timeout=60,
-            )
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException as e:
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            retryable = status is None or status == 429 or status >= 500
-            if not retryable or attempt == RETRIES - 1:
-                raise
-            print(f"  HSP not responding ({e}); retrying in {wait}s",
-                  file=sys.stderr)
-            time.sleep(wait)
-            wait *= 2
+    """POST to HSP, single attempt, fail fast. A timeout here means HSP is
+    throttling us (it stalls the connection rather than replying), so
+    retrying only pours more load on an already-limited endpoint. We let
+    the request fail and pick it up on a later run instead."""
+    r = requests.post(
+        url,
+        json=body,
+        auth=(HSP_USER, HSP_PASS),
+        headers={"Content-Type": "application/json"},
+        timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S),
+    )
+    r.raise_for_status()
+    return r.json()
 
 
 def to_minutes(hhmm: str) -> int:
@@ -226,6 +220,12 @@ def main():
                 wanted.append((d, from_loc, to_loc))
         d += timedelta(days=1)
 
+    # Fetch only a small batch per run to stay under HSP's rate limit. The
+    # rest is filled by later runs, since we only ever request what is still
+    # missing. Oldest missing dates go first so the window fills back to front.
+    total_missing = len(wanted)
+    wanted = wanted[:MAX_PAIRS_PER_RUN]
+
     def save():
         existing.sort(key=lambda s: (s["date"], s["sched_dep"]))
         # recompute on the whole window so late HSP corrections are picked up
@@ -237,7 +237,8 @@ def main():
             "services": existing,
         }, indent=1))
 
-    print(f"Fetching {len(wanted)} missing date/route combination(s)...", flush=True)
+    print(f"{total_missing} date/route combination(s) missing; fetching up to "
+          f"{len(wanted)} this run...", flush=True)
     consecutive_pair_failures = 0
     for d, from_loc, to_loc in wanted:
         print(f"  {d} {from_loc}->{to_loc}", flush=True)
@@ -256,8 +257,17 @@ def main():
         time.sleep(PAIR_SLEEP_S)
 
     save()
+    still_missing = {(s["date"], s["from"], s["to"]) for s in existing}
+    remaining = sum(
+        1 for d, f, t in (
+            (dd.strftime("%Y-%m-%d"), fl, tl)
+            for dd in (oldest + timedelta(days=i) for i in range((newest - oldest).days + 1))
+            for fl, tl in ROUTES
+        ) if (d, f, t) not in still_missing
+    )
     claimable = sum(1 for s in existing if s["claimable"])
-    print(f"Done. {len(existing)} services stored, {claimable} claimable.")
+    print(f"Done. {len(existing)} services stored, {claimable} claimable. "
+          f"{remaining} date/route combination(s) still to fetch on later runs.")
 
 
 if __name__ == "__main__":
