@@ -39,12 +39,15 @@ def post(url, body):
 
 
 def run():
-    print("1. serviceMetrics ...")
+    # A one-hour window keeps the query as small as possible, so this is
+    # the lightest probe we can make and the most likely to slip through
+    # while the account is still lightly rate-limited.
+    print("1. serviceMetrics (0700-0800 window) ...")
     metrics = post(METRICS_URL, {
         "from_loc": FROM_LOC,
         "to_loc": TO_LOC,
-        "from_time": "0000",
-        "to_time": "2359",
+        "from_time": "0700",
+        "to_time": "0800",
         "from_date": TEST_DATE,
         "to_date": TEST_DATE,
         "days": "WEEKDAY",
