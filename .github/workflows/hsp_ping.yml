@@ -1,0 +1,25 @@
+name: HSP connectivity diagnostic
+
+# One-shot diagnostic, manual only. Makes a single HSP call and prints
+# timing so we can tell a network/IP block apart from an app-level
+# throttle. Writes nothing and needs no write permissions.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Ping HSP
+        env:
+          HSP_USER: ${{ secrets.HSP_USER }}
+          HSP_PASS: ${{ secrets.HSP_PASS }}
+        run: python hsp_ping.py
